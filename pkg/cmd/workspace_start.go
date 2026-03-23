@@ -133,12 +133,14 @@ kortex-cli workspace start abc123
 
 # Start workspace with JSON output
 kortex-cli workspace start abc123 --output json`,
-		Args:    cobra.ExactArgs(1),
-		PreRunE: c.preRun,
-		RunE:    c.run,
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeNonRunningWorkspaceID,
+		PreRunE:           c.preRun,
+		RunE:              c.run,
 	}
 
 	cmd.Flags().StringVarP(&c.output, "output", "o", "", "Output format (supported: json)")
+	cmd.RegisterFlagCompletionFunc("output", newOutputFlagCompletion([]string{"json"}))
 
 	return cmd
 }
