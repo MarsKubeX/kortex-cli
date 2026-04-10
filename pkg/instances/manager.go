@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -239,6 +240,30 @@ func (m *manager) Add(ctx context.Context, opts AddOptions) (Instance, error) {
 				agentSettings, err = agentImpl.SetModel(agentSettings, opts.Model)
 				if err != nil {
 					return nil, fmt.Errorf("failed to apply agent model settings: %w", err)
+				}
+			}
+
+			// Convert skills directories to mounts using the agent's skills directory
+			if skillsDir := agentImpl.SkillsDir(); skillsDir != "" && mergedConfig != nil && mergedConfig.Skills != nil {
+				roTrue := true
+				seenTargets := make(map[string]string)
+				for _, skillsPath := range *mergedConfig.Skills {
+					target := path.Join(skillsDir, filepath.Base(skillsPath))
+					if existing, ok := seenTargets[target]; ok {
+						return nil, fmt.Errorf("skills %q and %q have the same target directory %q", existing, skillsPath, target)
+					}
+					seenTargets[target] = skillsPath
+					mount := workspace.Mount{
+						Host:   skillsPath,
+						Target: target,
+						Ro:     &roTrue,
+					}
+					if mergedConfig.Mounts == nil {
+						mounts := []workspace.Mount{mount}
+						mergedConfig.Mounts = &mounts
+					} else {
+						*mergedConfig.Mounts = append(*mergedConfig.Mounts, mount)
+					}
 				}
 			}
 		}
