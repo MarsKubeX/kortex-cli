@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	gokeyring "github.com/zalando/go-keyring"
 )
@@ -104,6 +105,29 @@ func (s *store) Create(params CreateParams) error {
 	}
 
 	return s.appendAndSave(sf, params)
+}
+
+// List reads secrets.json and returns metadata for all stored secrets.
+func (s *store) List() ([]ListItem, error) {
+	sf, err := s.loadSecretsFile()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ListItem, 0, len(sf.Secrets))
+	for _, rec := range sf.Secrets {
+		items = append(items, ListItem{
+			Name:           rec.Name,
+			Type:           rec.Type,
+			Description:    rec.Description,
+			Hosts:          rec.Hosts,
+			Path:           rec.Path,
+			Header:         rec.Header,
+			HeaderTemplate: rec.HeaderTemplate,
+			Envs:           rec.Envs,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
 }
 
 // loadSecretsFile reads and parses secrets.json, returning an empty struct when
