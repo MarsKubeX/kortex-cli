@@ -21,6 +21,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,6 +42,15 @@ func (f *fakeListStore) Create(params secret.CreateParams) error { return nil }
 
 func (f *fakeListStore) List() ([]secret.ListItem, error) {
 	return f.items, f.err
+}
+
+func (f *fakeListStore) Get(name string) (secret.ListItem, string, error) {
+	for _, item := range f.items {
+		if item.Name == name {
+			return item, "", nil
+		}
+	}
+	return secret.ListItem{}, "", fmt.Errorf("secret %q: %w", name, secret.ErrSecretNotFound)
 }
 
 func (f *fakeListStore) Remove(name string) error { return nil }
