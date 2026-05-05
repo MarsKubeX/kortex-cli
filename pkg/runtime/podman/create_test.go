@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	api "github.com/openkaiden/kdn-api/cli/go"
 	workspace "github.com/openkaiden/kdn-api/workspace-configuration/go"
 	"github.com/openkaiden/kdn/pkg/runtime"
 	"github.com/openkaiden/kdn/pkg/runtime/podman/config"
@@ -1749,4 +1750,238 @@ func assertDirectoryRemoved(t *testing.T, dir string) {
 			t.Logf("Instance directory contents: %v", entries)
 		}
 	}
+}
+
+func TestRenderPodYAML_Ports(t *testing.T) {
+	t.Parallel()
+
+	t.Run("renders port declarations in pod YAML when forwards are set", func(t *testing.T) {
+		t.Parallel()
+
+		data := podTemplateData{
+			Name:               "port-workspace",
+			OnecliWebPort:      11000,
+			OnecliVersion:      "1.17",
+			AgentUID:           1000,
+			BaseImageRegistry:  "registry.example.com/base",
+			BaseImageVersion:   "latest",
+			SourcePath:         "/workspace/sources",
+			ApprovalHandlerDir: "/tmp/approval",
+			Forwards: []api.WorkspaceForward{
+				{Bind: "127.0.0.1", Port: 54321, Target: 8080},
+				{Bind: "127.0.0.1", Port: 54322, Target: 3000},
+			},
+		}
+
+		rendered, err := renderPodYAML(data)
+		if err != nil {
+			t.Fatalf("renderPodYAML() failed: %v", err)
+		}
+
+		yaml := string(rendered)
+		if !strings.Contains(yaml, "containerPort: 8080") {
+			t.Errorf("Expected containerPort 8080 in YAML:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "hostPort: 54321") {
+			t.Errorf("Expected hostPort 54321 in YAML:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "containerPort: 3000") {
+			t.Errorf("Expected containerPort 3000 in YAML:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, "hostPort: 54322") {
+			t.Errorf("Expected hostPort 54322 in YAML:\n%s", yaml)
+		}
+		if !strings.Contains(yaml, `hostIP: "127.0.0.1"`) {
+			t.Errorf("Expected hostIP 127.0.0.1 in YAML:\n%s", yaml)
+		}
+	})
+
+	t.Run("omits ports section when no forwards configured", func(t *testing.T) {
+		t.Parallel()
+
+		data := podTemplateData{
+			Name:               "no-port-workspace",
+			OnecliWebPort:      11001,
+			OnecliVersion:      "1.17",
+			AgentUID:           1000,
+			BaseImageRegistry:  "registry.example.com/base",
+			BaseImageVersion:   "latest",
+			SourcePath:         "/workspace/sources",
+			ApprovalHandlerDir: "/tmp/approval",
+		}
+
+		rendered, err := renderPodYAML(data)
+		if err != nil {
+			t.Fatalf("renderPodYAML() failed: %v", err)
+		}
+
+		yaml := string(rendered)
+		// The only ports section should be for OneCLI (containerPort: 10254), not user ports
+		if strings.Contains(yaml, "containerPort: 8080") {
+			t.Errorf("Expected no user containerPort in YAML:\n%s", yaml)
+		}
+	})
+}
+
+func TestBuildForwards(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns nil when no workspace config", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		params := runtime.CreateParams{}
+
+		forwards, err := p.buildForwards(params)
+		if err != nil {
+			t.Fatalf("buildForwards() failed: %v", err)
+		}
+		if forwards != nil {
+			t.Errorf("Expected nil forwards, got %v", forwards)
+		}
+	})
+
+	t.Run("returns nil when ports is nil", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		params := runtime.CreateParams{
+			WorkspaceConfig: &workspace.WorkspaceConfiguration{},
+		}
+
+		forwards, err := p.buildForwards(params)
+		if err != nil {
+			t.Fatalf("buildForwards() failed: %v", err)
+		}
+		if forwards != nil {
+			t.Errorf("Expected nil forwards, got %v", forwards)
+		}
+	})
+
+	t.Run("allocates host ports for each container port", func(t *testing.T) {
+		t.Parallel()
+
+		p := &podmanRuntime{}
+		ports := []int{8080, 3000}
+		params := runtime.CreateParams{
+			WorkspaceConfig: &workspace.WorkspaceConfiguration{
+				Ports: &ports,
+			},
+		}
+
+		forwards, err := p.buildForwards(params)
+		if err != nil {
+			t.Fatalf("buildForwards() failed: %v", err)
+		}
+		if len(forwards) != 2 {
+			t.Fatalf("Expected 2 forwards, got %d", len(forwards))
+		}
+		for i, fwd := range forwards {
+			if fwd.Bind != "127.0.0.1" {
+				t.Errorf("Forward %d: expected Bind '127.0.0.1', got '%s'", i, fwd.Bind)
+			}
+			if fwd.Target != ports[i] {
+				t.Errorf("Forward %d: expected Target %d, got %d", i, ports[i], fwd.Target)
+			}
+			if fwd.Port <= 0 || fwd.Port > 65535 {
+				t.Errorf("Forward %d: Port %d is out of valid range", i, fwd.Port)
+			}
+		}
+	})
+}
+
+func TestCreate_ForwardsInRuntimeInfo(t *testing.T) {
+	t.Parallel()
+
+	newRuntime := func(t *testing.T) (*podmanRuntime, context.Context) {
+		t.Helper()
+		storageDir := t.TempDir()
+		sourcePath := t.TempDir()
+		onecliServer := newOnecliTestServer(t)
+
+		fakeExec := exec.NewFake()
+		fakeExec.RunFunc = func(ctx context.Context, args ...string) error { return nil }
+		fakeExec.OutputFunc = func(ctx context.Context, args ...string) ([]byte, error) {
+			return []byte("container-id-123"), nil
+		}
+
+		p := &podmanRuntime{
+			system:          &fakeSystem{},
+			executor:        fakeExec,
+			storageDir:      storageDir,
+			config:          &fakeConfig{},
+			onecliBaseURLFn: func(_ int) string { return onecliServer.URL },
+		}
+		ctx := steplogger.WithLogger(context.Background(), &fakeStepLogger{})
+		_ = sourcePath
+		return p, ctx
+	}
+
+	t.Run("forwards written to RuntimeInfo when ports configured", func(t *testing.T) {
+		t.Parallel()
+
+		p, ctx := newRuntime(t)
+		ports := []int{8080, 3000}
+		params := runtime.CreateParams{
+			Name:       "fwd-workspace",
+			SourcePath: t.TempDir(),
+			Agent:      "test_agent",
+			WorkspaceConfig: &workspace.WorkspaceConfiguration{
+				Ports: &ports,
+			},
+		}
+
+		info, err := p.Create(ctx, params)
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+
+		forwardsJSON, ok := info.Info["forwards"]
+		if !ok {
+			t.Fatal("Expected 'forwards' key in RuntimeInfo.Info")
+		}
+
+		var forwards []api.WorkspaceForward
+		if err := json.Unmarshal([]byte(forwardsJSON), &forwards); err != nil {
+			t.Fatalf("Failed to unmarshal forwards JSON: %v", err)
+		}
+		if len(forwards) != 2 {
+			t.Fatalf("Expected 2 forwards, got %d", len(forwards))
+		}
+		targets := map[int]bool{}
+		for _, fwd := range forwards {
+			targets[fwd.Target] = true
+			if fwd.Bind != "127.0.0.1" {
+				t.Errorf("Expected Bind '127.0.0.1', got '%s'", fwd.Bind)
+			}
+			if fwd.Port <= 0 || fwd.Port > 65535 {
+				t.Errorf("Port %d out of valid range", fwd.Port)
+			}
+		}
+		for _, want := range ports {
+			if !targets[want] {
+				t.Errorf("Expected target port %d in forwards, got %v", want, forwards)
+			}
+		}
+	})
+
+	t.Run("forwards absent from RuntimeInfo when no ports configured", func(t *testing.T) {
+		t.Parallel()
+
+		p, ctx := newRuntime(t)
+		params := runtime.CreateParams{
+			Name:       "no-fwd-workspace",
+			SourcePath: t.TempDir(),
+			Agent:      "test_agent",
+		}
+
+		info, err := p.Create(ctx, params)
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+
+		if _, ok := info.Info["forwards"]; ok {
+			t.Errorf("Expected no 'forwards' key in RuntimeInfo.Info when no ports configured")
+		}
+	})
 }
